@@ -1,0 +1,106 @@
+# ML Challenge 2026: Business Entity Resolution Solution Template
+
+**Team Name:** Antigravity ER  
+**Team Members:** Gaurang Bhatia  
+**Submission Date:** 2026-09-26  
+
+---
+
+## 1. Executive Summary
+We developed a scalable, high-precision two-stage business entity resolution architecture combining a high-recall multi-key inverted index for candidate blocking with a vectorized LightGBM re-ranking classifier. Our pipeline resolves multi-lingual cross-script records via Indic squashed transliteration and French accent stripping, eliminating external lookups while scaling to 1.73M queries and ~10M targets with sub-4GB RAM usage and sub-5 minute execution. On held-out validation data, the system achieves **96.75% candidate recall** and a **macro $F_{0.5}$ score of 0.9611**, up from the previous baseline of 0.565.
+
+---
+
+## 2. Methodology
+
+### 2.1 Problem Analysis
+During exploratory data analysis across the 12.5M training records, we identified three critical root causes limiting prior entity resolution performance:
+1. **The 56% Blocking Recall Ceiling**: Prior approaches discarded any token with document frequency > 80 across the 10M record target corpus, causing 43.8% of true matches to be permanently omitted before scoring.
+2. **Cross-Script Transliteration Disconnect**: 46.7% of queries are from India, where ~13.4% of target names are represented in native Indic scripts (Hindi, Tamil, Telugu, Kannada, etc.). Standard ASCII tokenizers yielded 0.0 similarity for these pairs despite identical real-world identities.
+3. **Field Absence & Asymmetry**: 4.67% of valid target records contain null or empty addresses, causing static composite scoring functions to arbitrarily penalize genuine business matches below acceptance thresholds.
+4. **Country Partitioning**: Exactly 100.0% of true ground truth matches occur within the same country label (`US`, `India`, `France`), allowing strict partition isolation.
+
+### 2.2 Solution Strategy
+We implemented a two-stage **Blocking + GBDT Classifier** architecture:
+- **Approach Type:** Country-Partitioned Inverted Index Blocking + Vectorized LightGBM Pair Re-ranking.
+- **Core Innovation:** 
+  1. *Indic Squashed Transliteration*: Transliterates Unicode scripts via `text_unidecode` combined with vowel/consonant character compression (e.g. Telugu `బాలాజీ` $\to$ `baalaajii` $\to$ `balaji`), achieving near-perfect token convergence.
+  2. *Adaptive Dynamic Field Scoring*: Differentiates full-field pairs from empty-address pairs, evaluating high-confidence business name exactness.
+  3. *In-Memory Integer Posting Arrays*: Replaces multi-gigabyte SQLite disk churn with lightweight `array('I')` posting lists, executing tens of thousands of queries per second.
+
+---
+
+## 3. Candidate Generation (Blocking)
+
+- **Blocking keys used:**
+  - `N_FULL|<name>`: Cleaned, normalized business name (weight 8).
+  - `NUM_A|<num>_<street>`: Street number + street name token anchor (weight 8).
+  - `N_BI|<tok1>_<tok2>`: Business name 2-grams capturing multi-token firm identity (weight 5).
+  - `A_BI|<tok1>_<tok2>`: Address token 2-grams (weight 5).
+  - `NUM|<num>`: 4+ digit numeric identifiers (postal codes, PIN codes, suite numbers) (weight 5).
+  - `N_TOK|<tok>`: Distinctive name tokens $\ge 3$ characters (weight 3).
+  - `A_TOK|<tok>`: Distinctive address tokens $\ge 3$ characters (weight 1).
+- **Candidate pairs generated:** Top 60 ranked candidates per Source 1 entity (bounded to candidates with weighted key overlap $\ge 1$).
+- **How you ensured true matches were not lost:** Multi-faceted key redundancy across both name, address, and numeric fields guarantees that variation or noise in one field is compensated by anchors in another. Frequency limits were raised to 1,500 to retain moderately frequent yet highly informative tokens (e.g. local municipal words, industrial park identifiers).
+
+---
+
+## 4. Matching Model
+
+**Features used:**
+- **Name features:**
+  - `name_token_set_ratio`: RapidFuzz C++ token set ratio.
+  - `name_token_sort_ratio`: RapidFuzz token sort ratio (insensitivity to word transposition).
+  - `name_ratio`: Normalized Levenshtein ratio.
+  - `name_partial_ratio`: Substring alignment ratio (accommodating DBA names and legal prefixes).
+  - `exact_name`: Boolean indicator for identical non-empty names.
+- **Address features:**
+  - `addr_token_set_ratio`: RapidFuzz token set ratio over cleaned addresses.
+  - `addr_token_sort_ratio`: RapidFuzz token sort ratio over cleaned addresses.
+  - `addr_ratio`: Normalized Levenshtein ratio over cleaned addresses.
+  - `exact_addr`: Boolean indicator for identical non-empty addresses.
+  - `has_empty_addr`: Boolean indicator flagging pairs where either address is missing.
+- **Numeric & Structural features:**
+  - `num_common`: Absolute count of shared numbers (PIN/ZIP codes, street numbers).
+  - `num_jaccard`: Jaccard index of number sets between addresses.
+  - `block_weight`: Composite score generated by the multi-key blocking engine.
+
+**Model type:** LightGBM Gradient Boosted Decision Tree (180 trees, max depth 7, 35 leaves, learning rate 0.07).  
+**Threshold selection method:** Grid search optimizing macro $F_{0.5}$ on held-out validation splits. A calibrated probability threshold of **0.74** was selected to strongly favor precision and eliminate false merges on singletons.
+
+---
+
+## 5. Results & Error Analysis
+
+- **F_0.5 Score (macro):** **0.9611** on 10,000 held-out training queries with 150,000 distractor targets (up from 0.565 baseline). Candidate recall reached **96.75%**.
+- **Common false positives (wrong merges):** Franchises or chain businesses sharing near-identical brand names and generic street names in adjacent metropolitan regions without distinct building numbers.
+- **Common false negatives (missed matches):** Entities where both business name and address experienced severe concurrent corruptions (e.g., misspelled name combined with truncated postal code and missing street name).
+
+---
+
+## 6. Conclusion
+By restructuring candidate blocking into an in-memory multi-key inverted index, introducing phonetic Indic squashed transliteration, and re-ranking candidate pairs with a precision-tuned LightGBM classifier, we lifted candidate recall to over 96% and achieved a macro $F_{0.5}$ of 0.9611. The resulting solution is fully autonomous, requires zero network lookups, and runs on standard local hardware in minutes.
+
+---
+
+## Appendix
+
+### A. Code Artefacts
+All runnable source code is self-contained in `code/business_entity_resolution/`:
+- `src/normalizer.py`: Text cleaning, phonetic transliteration, and token normalization.
+- `src/blocking.py`: Multi-key generation and in-memory inverted index candidate generation.
+- `src/features.py`: RapidFuzz C++ similarity feature vector extraction.
+- `src/train_model.py`: Generates hard-negative training pairs and fits the LightGBM booster (`src/model.txt`).
+- `src/entity_resolution.py`: Primary CLI pipeline orchestrator producing `output/matching_results.tsv` and `output/candidate_pairs.tsv`.
+- `src/evaluate_val.py`: Local validation script computing exact competition macro $F_{0.5}$.
+- `requirements.txt`: Pinned dependencies (`lightgbm`, `rapidfuzz`, `text-unidecode`, `numpy`).
+- `README.md`: Step-by-step reproduction instructions.
+
+### B. Additional Results
+- **Validation Macro F_0.5 across thresholds:**
+  - Threshold 0.65: 0.9572
+  - Threshold 0.70: 0.9602
+  - **Threshold 0.74: 0.9611 (Selected)**
+  - Threshold 0.78: 0.9589
+  - Threshold 0.82: 0.9524
+- Singletons correctly identified with 0 false matches earned a perfect 1.0 macro contribution, strongly benefiting leaderboard performance under the macro-averaged $F_{0.5}$ metric.
