@@ -8,6 +8,7 @@ FEATURE_NAMES = [
     "name_token_sort_ratio",
     "name_ratio",
     "name_partial_ratio",
+    "name_sim_max",
     "has_empty_addr",
     "addr_token_set_ratio",
     "addr_token_sort_ratio",
@@ -17,6 +18,7 @@ FEATURE_NAMES = [
     "exact_name",
     "exact_addr",
     "block_weight",
+    "name_addr_interaction",
 ]
 
 
@@ -29,12 +31,13 @@ def extract_pair_features(
     t_nums: set[str],
     block_weight: int,
 ) -> list[float]:
-    """Computes a rich 13-dimensional feature vector for a candidate pair."""
+    """Computes a rich 15-dimensional feature vector for a candidate pair."""
     # Name features
     n_set = fuzz.token_set_ratio(qn, tn) / 100.0
     n_sort = fuzz.token_sort_ratio(qn, tn) / 100.0
     n_ratio = fuzz.ratio(qn, tn) / 100.0
     n_partial = fuzz.partial_ratio(qn, tn) / 100.0
+    name_sim_max = max(n_set, n_sort, n_ratio, n_partial)
 
     # Address features
     has_empty_addr = 1.0 if (not qa or not ta) else 0.0
@@ -46,6 +49,10 @@ def extract_pair_features(
         a_set = 0.0
         a_sort = 0.0
         a_ratio = 0.0
+
+    # Cross-field interaction
+    effective_addr = a_set if not has_empty_addr else 0.85
+    name_addr_interaction = name_sim_max * effective_addr
 
     # Number overlap features
     common_nums = len(q_nums & t_nums)
@@ -60,6 +67,7 @@ def extract_pair_features(
         n_sort,
         n_ratio,
         n_partial,
+        name_sim_max,
         has_empty_addr,
         a_set,
         a_sort,
@@ -69,4 +77,5 @@ def extract_pair_features(
         exact_name,
         exact_addr,
         float(block_weight),
+        name_addr_interaction,
     ]

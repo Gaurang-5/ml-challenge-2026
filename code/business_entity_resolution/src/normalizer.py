@@ -11,7 +11,8 @@ import text_unidecode
 LEGAL_SUFFIXES = frozenset({
     "inc", "incorporated", "corp", "corporation", "co", "company", "ltd",
     "limited", "llc", "llp", "plc", "pvt", "private", "sa", "sarl", "sas",
-    "eurl", "sci", "snc", "services", "center", "enterprises", "solutions",
+    "eurl", "sci", "snc", "ei", "sasu", "sarlu", "gie", "earl", "selarl",
+    "sca", "scs", "services", "center", "enterprises", "solutions",
     "consulting", "group", "holdings", "associates", "partners", "international"
 })
 
@@ -20,7 +21,9 @@ ADDRESS_STOP_WORDS = frozenset({
     "dr", "near", "the", "and", "of", "at", "behind", "opposite", "building",
     "floor", "unit", "block", "sector", "flat", "door", "no", "opp", "nr",
     "bh", "rue", "r", "av", "bd", "boulevard", "all", "allee", "pl", "place",
-    "chem", "chemin", "pobox", "po", "box", "hno", "plot", "doorno"
+    "chem", "chemin", "pobox", "po", "box", "hno", "plot", "doorno",
+    "de", "la", "le", "les", "du", "des", "d", "l", "cours", "crs", "impasse", "imp",
+    "passage", "route", "rte"
 })
 
 ADDRESS_EXPANSIONS = {
@@ -30,7 +33,9 @@ ADDRESS_EXPANSIONS = {
     "apt": "apartment", "bldg": "building", "fl": "floor",
     "opp": "opposite", "nr": "near", "bh": "behind", "col": "colony",
     "sec": "sector", "h.no": "hno", "h-no": "hno", "p.o.": "pobox",
-    "r.": "rue", "av.": "avenue", "bd.": "boulevard", "pl.": "place"
+    "r.": "rue", "av.": "avenue", "bd.": "boulevard", "pl.": "place",
+    "crs": "cours", "imp": "impasse", "rte": "route", "fbg": "faubourg",
+    "r": "rue", "av": "avenue", "bd": "boulevard"
 }
 
 
@@ -44,8 +49,8 @@ def clean_text(s: str) -> str:
     s = re.sub(r"\.(com|org|net|in|co|us|gov|io|fr)\b", " ", s)
     # Strip DBA / C/O trading prefixes
     s = re.sub(r"\b(d\.?b\.?a\.?|c/o|t/a)\b", " ", s)
-    # Compress repeated consonants and vowels (e.g. baalaajii -> balaji)
-    s = re.sub(r"(.)\1+", r"\1", s)
+    # Compress repeated consonants and vowels (letters only, preserving house numbers and PIN codes)
+    s = re.sub(r"([a-zA-Z])\1+", r"\1", s)
     # Strip non-alphanumeric
     s = re.sub(r"[^\w]+", " ", s).strip()
     return s

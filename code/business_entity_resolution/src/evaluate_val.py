@@ -99,7 +99,22 @@ def evaluate(train_dir: Path, model_path: Path, eval_sample: int = 15000, thresh
             features_batch.append(feat)
 
         probs = booster.predict(features_batch)
-        matched = {cand_eids[i] for i, p in enumerate(probs) if p >= threshold}
+        matched_candidates = []
+        for i, p in enumerate(probs):
+            if p < threshold:
+                continue
+            feat = features_batch[i]
+            name_sim = feat[4]
+            has_empty_addr = (feat[5] == 1.0)
+            addr_sim = max(feat[6], feat[7], feat[8])
+            num_common = feat[9]
+            if name_sim < 0.55:
+                continue
+            if not has_empty_addr and addr_sim < 0.35 and num_common == 0 and feat[2] < 0.90:
+                continue
+            matched_candidates.append((cand_eids[i], p))
+        matched_candidates.sort(key=lambda x: x[1], reverse=True)
+        matched = {m[0] for m in matched_candidates[:8]}
         predictions[eid] = matched
 
     t1 = time.time()

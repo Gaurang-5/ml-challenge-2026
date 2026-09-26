@@ -57,12 +57,14 @@ def run_pipeline(
             country = (row.get("country") or "__unknown__").strip()
             ordered_s1_ids.append(eid)
             
-            qn, _ = clean_business_name(row["business_name"])
-            qa, _, q_nums = clean_address(row["business_address"])
+            raw_n = row["business_name"]
+            raw_a = row["business_address"]
+            qn, _ = clean_business_name(raw_n)
+            qa, _, q_nums = clean_address(raw_a)
             
             if country not in queries_by_country:
                 queries_by_country[country] = []
-            queries_by_country[country].append((eid, qn, qa, set(q_nums)))
+            queries_by_country[country].append((eid, qn, qa, set(q_nums), raw_n, raw_a))
 
     total_s1 = len(ordered_s1_ids)
     print(f"Loaded {total_s1:,} Source 1 entities across countries: {list(queries_by_country.keys())}", flush=True)
@@ -123,12 +125,8 @@ def run_pipeline(
             batch_features: list[list[float]] = []
             query_slices: list[tuple[str, list[str], int, int]] = []
             
-            for eid, qn, qa, q_nums in batch_queries:
-                query_keys = generate_blocking_keys(qn, qa)
-                for num in q_nums:
-                    if len(num) >= 2:
-                        query_keys.add(f"NUM|{num}")
-                        
+            for eid, qn, qa, q_nums, raw_n, raw_a in batch_queries:
+                query_keys = generate_blocking_keys(raw_n, raw_a)
                 candidates = index.get_candidates(query_keys, max_key_frequency=max_key_freq, top_k=top_candidates)
                 
                 if not candidates:
@@ -154,16 +152,39 @@ def run_pipeline(
                     probs = booster.predict(batch_features)
                 else:
                     probs = [
-                        (0.5 * f[0] + 0.4 * f[5] + 0.1 * f[9]) if f[4] == 0.0 else (f[0] * 0.95)
+                        (0.5 * f[0] + 0.4 * f[6] + 0.1 * f[10]) if f[5] == 0.0 else (f[0] * 0.95)
                         for f in batch_features
                     ]
 
                 for eid, cand_eids, s_idx, e_idx in query_slices:
                     q_probs = probs[s_idx:e_idx]
-                    matched_eids = [
-                        cand_eids[i] for i, p in enumerate(q_probs) if p >= threshold
-                    ]
-                    results_matching[eid] = ",".join(matched_eids)
+                    matched_candidates = []
+                    for i, p in enumerate(q_probs):
+                        if p < threshold:
+                            continue
+                        feat = batch_features[s_idx + i]
+                        # feat[4] is name_sim_max
+                        name_sim = feat[4]
+                        # feat[5] is has_empty_addr
+                        has_empty_addr = (feat[5] == 1.0)
+                        # feat[6]: addr_token_set_ratio, feat[7]: addr_token_sort_ratio, feat[8]: addr_ratio
+                        addr_sim = max(feat[6], feat[7], feat[8])
+                        num_common = feat[9]
+                        
+                        # Guardrail 1: Entity identity requires non-trivial name similarity
+                        if name_sim < 0.55:
+                            continue
+                        
+                        # Guardrail 2: If both records provide addresses, avoid matching completely different streets
+                        if not has_empty_addr and addr_sim < 0.35 and num_common == 0 and feat[2] < 0.90:
+                            continue
+                            
+                        matched_candidates.append((cand_eids[i], p))
+
+                    # Sort matches by model probability descending and cap at 8
+                    matched_candidates.sort(key=lambda x: x[1], reverse=True)
+                    capped_matches = [m[0] for m in matched_candidates[:8]]
+                    results_matching[eid] = ",".join(capped_matches)
 
             processed = min(b_start + batch_size, len(queries))
             if processed % 50000 == 0 or processed == len(queries):
