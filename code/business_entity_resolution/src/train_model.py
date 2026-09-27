@@ -149,9 +149,16 @@ def train(train_dir: Path, output_model_path: Path, max_queries: int = 40000) ->
         flush=True,
     )
 
-    print("Fitting LightGBM model...", flush=True)
+    # Train/Validation split for live metric tracking
+    from sklearn.model_selection import train_test_split
+    X_train, X_val, y_train, y_val = train_test_split(
+        X, y, test_size=0.10, random_state=42, stratify=y
+    )
+    print(f"Split into {len(X_train):,} train pairs and {len(X_val):,} validation pairs.", flush=True)
+
+    print("\n--- Starting LightGBM Training (Live Iteration Metrics) ---", flush=True)
     clf = lgb.LGBMClassifier(
-        n_estimators=200,
+        n_estimators=220,
         learning_rate=0.07,
         num_leaves=40,
         max_depth=8,
@@ -161,11 +168,18 @@ def train(train_dir: Path, output_model_path: Path, max_queries: int = 40000) ->
         random_state=42,
         verbose=-1,
     )
-    clf.fit(X, y)
+    clf.fit(
+        X_train,
+        y_train,
+        eval_set=[(X_val, y_val)],
+        eval_names=["valid"],
+        eval_metric=["binary_logloss", "auc"],
+        callbacks=[lgb.log_evaluation(period=10)],
+    )
 
     output_model_path.parent.mkdir(parents=True, exist_ok=True)
     clf.booster_.save_model(str(output_model_path))
-    print(f"Model successfully saved to {output_model_path}!", flush=True)
+    print(f"\nModel successfully trained and saved to {output_model_path}!", flush=True)
 
 
 if __name__ == "__main__":

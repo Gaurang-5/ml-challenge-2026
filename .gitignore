@@ -1,8 +1,10 @@
 # Data and large generated artifacts
 dataset/
+student_resource/
 output/
 outputs/
 work/
+*.log
 *.zip
 *.sqlite
 
