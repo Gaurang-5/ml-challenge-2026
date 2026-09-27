@@ -33,7 +33,7 @@ We implemented an enhanced **Two-Stage Multi-Key Blocking + Constrained LightGBM
   1. *Linguistically Complete French Normalization*: Comprehensive expansion of French corporate forms, directional abbreviations (`crs` $\to$ `cours`, `imp` $\to$ `impasse`, `rte` $\to$ `route`, `fbg` $\to$ `faubourg`), address stopwords (`de`, `la`, `du`, `des`, `d`, `l`), and alphabetic-only phonetic squashing (`r"([a-zA-Z])\1+"`), preserving all street numbers intact.
   2. *Hard-Negative Mining & Balanced Training Synthesis*: Augmented 1.88M training pairs with hard spatial negatives (identical address, distinct business names from different industrial sectors), hard name negatives (identical business names across different cities/streets), and identity anchors `(name, addr, name, addr)` to calibrate exact matches.
   3. *Cross-Field Interaction Feature*: Engineered `name_addr_interaction = name_sim_max * addr_sim_max`, mathematically preventing the tree from predicting high match probability based on address similarity alone when name similarity is low.
-  4. *Post-Processing Precision Guardrails*: Hard name floor threshold (`name_sim_max >= 0.55`), strict address conflict rejection when both entities have divergent street numbers / PIN codes, and a top-8 candidate cap per entity.
+  4. *Calibrated Operating Threshold & Cluster Capping*: Empirically tuned probability threshold (0.60) optimizing Macro $F_{0.5}$ and a dynamic top-12 match cap, avoiding artificial truncation of legitimate franchises while eliminating run-away cluster explosion.
 
 ---
 
@@ -81,11 +81,10 @@ We implemented an enhanced **Two-Stage Multi-Key Blocking + Constrained LightGBM
 ### 4.2 Model Architecture & Training
 - **Model Type:** LightGBM Gradient Boosted Decision Tree (180 trees, max depth 7, 35 leaves, learning rate 0.07, objective: `binary`).
 - **Training Strategy:** Trained on 1,883,490 pairs, incorporating 100,000 hard spatial negatives and 100,000 hard name negatives to break spurious feature co-occurrences.
-- **Threshold & Decision Guardrails:**
-  - Probability Threshold: **0.74** (optimizing Macro $F_{0.5}$).
-  - Name Floor Gate: Candidates must have `name_sim_max >= 0.55` to be eligible for matching.
-  - Address Incompatibility Gate: Candidates with conflicting street numbers and `addr_sim < 0.35` are rejected regardless of tree score.
-  - Max Match Cap: Top 8 matches per Source 1 entity, eliminating pathological hub clusters.
+- **Threshold & Decision Calibration:**
+  - Probability Threshold: **0.60** (empirically calibrated via threshold sweep optimizing Macro $F_{0.5}$, outperforming 0.74 on validation).
+  - Learned Multi-Feature Decision Boundary: Handled natively by the LightGBM booster utilizing the `name_addr_interaction` feature rather than brittle hard post-filters that induce false negatives.
+  - Max Match Cap: Top 12 matches per Source 1 entity, preventing pathological cluster explosion while accommodating legitimate multi-source aliases.
 
 ---
 

@@ -28,7 +28,7 @@ python3 src/entity_resolution.py \
   --test-dir ../../dataset/test \
   --output-dir ../../output \
   --model-path src/model.txt \
-  --threshold 0.74
+  --threshold 0.60
 ```
 
 ## Validation

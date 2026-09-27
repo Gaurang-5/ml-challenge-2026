@@ -26,7 +26,7 @@ def run_pipeline(
     test_dir: Path,
     output_dir: Path,
     model_path: Path | None = None,
-    threshold: float = 0.74,
+    threshold: float = 0.60,
     top_candidates: int = 60,
     max_key_freq: int = 1500,
 ) -> None:
@@ -162,28 +162,11 @@ def run_pipeline(
                     for i, p in enumerate(q_probs):
                         if p < threshold:
                             continue
-                        feat = batch_features[s_idx + i]
-                        # feat[4] is name_sim_max
-                        name_sim = feat[4]
-                        # feat[5] is has_empty_addr
-                        has_empty_addr = (feat[5] == 1.0)
-                        # feat[6]: addr_token_set_ratio, feat[7]: addr_token_sort_ratio, feat[8]: addr_ratio
-                        addr_sim = max(feat[6], feat[7], feat[8])
-                        num_common = feat[9]
-                        
-                        # Guardrail 1: Entity identity requires non-trivial name similarity
-                        if name_sim < 0.55:
-                            continue
-                        
-                        # Guardrail 2: If both records provide addresses, avoid matching completely different streets
-                        if not has_empty_addr and addr_sim < 0.35 and num_common == 0 and feat[2] < 0.90:
-                            continue
-                            
                         matched_candidates.append((cand_eids[i], p))
 
-                    # Sort matches by model probability descending and cap at 8
+                    # Sort matches by model probability descending and cap at 12
                     matched_candidates.sort(key=lambda x: x[1], reverse=True)
-                    capped_matches = [m[0] for m in matched_candidates[:8]]
+                    capped_matches = [m[0] for m in matched_candidates[:12]]
                     results_matching[eid] = ",".join(capped_matches)
 
             processed = min(b_start + batch_size, len(queries))
@@ -213,7 +196,7 @@ def main() -> None:
     parser.add_argument("--test-dir", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--model-path", type=Path, default=Path(__file__).parent / "model.txt")
-    parser.add_argument("--threshold", type=float, default=0.74, help="Confidence threshold for final match")
+    parser.add_argument("--threshold", type=float, default=0.60, help="Confidence threshold for final match")
     parser.add_argument("--top-candidates", type=int, default=60, help="Max candidates per query")
     parser.add_argument("--max-key-freq", type=int, default=1500, help="Max blocking key frequency")
     args = parser.parse_args()
