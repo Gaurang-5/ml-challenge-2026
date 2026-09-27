@@ -2,10 +2,11 @@
 End-to-End Business Entity Resolution Inference Pipeline.
 
 Features:
-- Multi-Key Inverted Index with lean candidate generation (default: top_k = 20)
-- Dual backend: PyTorch Deep Learning (Apple GPU/MPS & CUDA) or LightGBM GBDT
+- Multi-Key Inverted Index with lean candidate generation (default: top_k = 60,
+  matching train_model.py / evaluate_val.py exactly)
+- LightGBM GBDT re-ranking (canonical model for this submission)
 - Global Competitive Bipartite Matching enforcing 1-to-1 Target Invariant
-- Scalable, country-isolated execution under 4GB RAM
+- Scalable, country-isolated execution
 """
 
 from __future__ import annotations
@@ -18,55 +19,78 @@ import sys
 import time
 
 import numpy as np
-import torch
 
 try:
     import lightgbm as lgb
 except ImportError:
     lgb = None
 
+try:
+    import torch
+    from neural_model import EntityResolutionNet
+except ImportError:
+    torch = None
+    EntityResolutionNet = None
+
 sys.path.insert(0, str(Path(__file__).parent))
-from normalizer import clean_business_name, clean_address
+from normalizer import clean_business_name, clean_address, normalize_country
 from blocking import generate_blocking_keys, InvertedIndex
 from features import extract_pair_features
-from neural_model import EntityResolutionNet
 
 csv.field_size_limit(sys.maxsize)
+
+# Canonical blocking / matching parameters — MUST match train_model.py and evaluate_val.py.
+DEFAULT_TOP_K = 60
+DEFAULT_MAX_KEY_FREQ = 1500
+DEFAULT_MATCH_CAP = 12
+
+
+def load_model(model_path: Path):
+    """Loads exactly one model type and states unambiguously which one, so the
+    methodology doc and the running code can never silently diverge."""
+    if model_path.suffix == ".txt":
+        if lgb is None:
+            raise RuntimeError("lightgbm is not installed but a .txt (LightGBM) model was requested.")
+        print(f"[MODEL] Loading LightGBM booster from {model_path}", flush=True)
+        return "lightgbm", lgb.Booster(model_file=str(model_path)), None
+
+    if model_path.suffix == ".pt":
+        if torch is None or EntityResolutionNet is None:
+            raise RuntimeError("torch is not installed but a .pt (PyTorch) model was requested.")
+        device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+        print(f"[MODEL] Loading PyTorch model from {model_path} onto {device}", flush=True)
+        ckpt = torch.load(str(model_path), map_location=device)
+        model = EntityResolutionNet(
+            input_dim=ckpt.get("input_dim", 15),
+            hidden_dims=ckpt.get("hidden_dims", [128, 64, 32]),
+        ).to(device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        model.eval()
+        return "pytorch", model, device
+
+    raise ValueError(f"Unrecognized model file extension: {model_path.suffix}")
 
 
 def run_pipeline(
     test_dir: Path,
     output_dir: Path,
-    model_path: Path | None = None,
+    model_path: Path,
     threshold: float = 0.60,
-    top_candidates: int = 20,
-    max_key_freq: int = 1500,
+    top_candidates: int = DEFAULT_TOP_K,
+    max_key_freq: int = DEFAULT_MAX_KEY_FREQ,
+    match_cap: int = DEFAULT_MATCH_CAP,
 ) -> None:
     t_start = time.time()
     output_dir.mkdir(parents=True, exist_ok=True)
     matching_file = output_dir / "matching_results.tsv"
     candidate_file = output_dir / "candidate_pairs.tsv"
 
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-    pytorch_model = None
-    booster = None
+    model_kind, model_obj, device = load_model(model_path)
+    booster = model_obj if model_kind == "lightgbm" else None
+    pytorch_model = model_obj if model_kind == "pytorch" else None
 
-    # Load model
-    if model_path and model_path.exists():
-        if model_path.suffix == ".pt":
-            print(f"Loading PyTorch Model from {model_path} onto {device}...", flush=True)
-            ckpt = torch.load(str(model_path), map_location=device)
-            pytorch_model = EntityResolutionNet(
-                input_dim=ckpt.get("input_dim", 15),
-                hidden_dims=ckpt.get("hidden_dims", [128, 64, 32]),
-            ).to(device)
-            pytorch_model.load_state_dict(ckpt["model_state_dict"])
-            pytorch_model.eval()
-        elif lgb is not None:
-            print(f"Loading LightGBM model from {model_path}...", flush=True)
-            booster = lgb.Booster(model_file=str(model_path))
-    else:
-        print("Warning: No model file found, falling back to heuristic scoring.", flush=True)
+    print(f"[CONFIG] top_candidates={top_candidates}, max_key_freq={max_key_freq}, "
+          f"threshold={threshold}, match_cap={match_cap}", flush=True)
 
     # Pass 1: Scan Source 1 queries preserving exact file order
     s1_path = test_dir / "test_source1.tsv"
@@ -79,7 +103,7 @@ def run_pipeline(
         reader = csv.DictReader(f, delimiter="\t")
         for row in reader:
             eid = row["entity_id"]
-            country = (row.get("country") or "__unknown__").strip()
+            country = normalize_country(row.get("country"))
             ordered_s1_ids.append(eid)
 
             raw_n = row["business_name"]
@@ -110,7 +134,6 @@ def run_pipeline(
         print(f"Processing Country: [{country}] ({len(queries):,} queries)")
         print(f"=======================================================")
 
-        # Build in-memory target index
         print(f"Building in-memory inverted index for [{country}] targets...", flush=True)
         index = InvertedIndex()
         target_ids: list[str] = []
@@ -123,7 +146,7 @@ def run_pipeline(
             with open(t_path, encoding="utf-8") as f:
                 reader = csv.DictReader(f, delimiter="\t")
                 for row in reader:
-                    c = (row.get("country") or "__unknown__").strip()
+                    c = normalize_country(row.get("country"))
                     if c != country:
                         continue
                     t_idx = len(target_ids)
@@ -165,7 +188,6 @@ def run_pipeline(
 
                 query_slices.append((eid, cand_eids, start_idx, end_idx))
 
-            # Model inference
             if batch_features:
                 if pytorch_model is not None:
                     with torch.no_grad():
@@ -174,10 +196,7 @@ def run_pipeline(
                 elif booster is not None:
                     probs = booster.predict(batch_features)
                 else:
-                    probs = [
-                        (0.5 * f[0] + 0.4 * f[6] + 0.1 * f[10]) if f[5] == 0.0 else (f[0] * 0.95)
-                        for f in batch_features
-                    ]
+                    raise RuntimeError("No model loaded — this should be unreachable given load_model().")
 
                 for eid, cand_eids, s_idx, e_idx in query_slices:
                     q_probs = probs[s_idx:e_idx]
@@ -192,7 +211,6 @@ def run_pipeline(
                 print(f"  [{country}] Scoring: {processed:,} / {len(queries):,} ({rate:.1f} queries/sec)", flush=True)
 
         print(f"Applying Competitive Bipartite Matching for [{country}] ({len(country_scored_pairs):,} candidates)...", flush=True)
-        # Sort descending by probability: highest confidence matches claim targets first
         country_scored_pairs.sort(key=lambda x: x[0], reverse=True)
         claimed_targets = set()
         country_matches = defaultdict(list)
@@ -200,7 +218,7 @@ def run_pipeline(
         for p, q_eid, c_eid in country_scored_pairs:
             if c_eid in claimed_targets:
                 continue
-            if len(country_matches[q_eid]) >= 10:
+            if len(country_matches[q_eid]) >= match_cap:
                 continue
             country_matches[q_eid].append(c_eid)
             claimed_targets.add(c_eid)
@@ -208,9 +226,9 @@ def run_pipeline(
         for q_eid, matches in country_matches.items():
             results_matching[q_eid] = ",".join(matches)
 
-        print(f"Finished [{country}] in {time.time() - t_country_start:.2f}s (Resolved {len(claimed_targets):,} unique target matches).", flush=True)
+        print(f"Finished [{country}] in {time.time() - t_country_start:.2f}s "
+              f"(Resolved {len(claimed_targets):,} unique target matches).", flush=True)
 
-    # Write output files in exact original Source 1 order
     print(f"\nWriting final outputs to {output_dir}...", flush=True)
     for eid in ordered_s1_ids:
         m_writer.writerow([eid, results_matching.get(eid, "")])
@@ -228,24 +246,31 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--test-dir", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
-    parser.add_argument("--model-path", type=Path, default=Path(__file__).parent / "model.pt")
-    parser.add_argument("--threshold", type=float, default=0.60, help="Confidence threshold for final match")
-    parser.add_argument("--top-candidates", type=int, default=20, help="Max candidates per query")
-    parser.add_argument("--max-key-freq", type=int, default=1500, help="Max blocking key frequency")
+    parser.add_argument(
+        "--model-path", type=Path, default=Path(__file__).parent / "model.txt",
+        help="Explicit path. Defaults to the LightGBM model.txt — the canonical model "
+             "described in the methodology doc. Pass a .pt path explicitly to use PyTorch instead.",
+    )
+    parser.add_argument("--threshold", type=float, default=0.60)
+    parser.add_argument("--top-candidates", type=int, default=DEFAULT_TOP_K)
+    parser.add_argument("--max-key-freq", type=int, default=DEFAULT_MAX_KEY_FREQ)
+    parser.add_argument("--match-cap", type=int, default=DEFAULT_MATCH_CAP)
     args = parser.parse_args()
 
-    # Fallback to model.txt if model.pt doesn't exist yet
-    model_path = args.model_path
-    if not model_path.exists() and (model_path.parent / "model.txt").exists():
-        model_path = model_path.parent / "model.txt"
+    if not args.model_path.exists():
+        raise FileNotFoundError(
+            f"Model file not found: {args.model_path}. "
+            f"Pass --model-path explicitly if it's not at the default location."
+        )
 
     run_pipeline(
         test_dir=args.test_dir,
         output_dir=args.output_dir,
-        model_path=model_path,
+        model_path=args.model_path,
         threshold=args.threshold,
         top_candidates=args.top_candidates,
         max_key_freq=args.max_key_freq,
+        match_cap=args.match_cap,
     )
 
 

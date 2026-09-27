@@ -8,7 +8,13 @@ cd "$DIR"
 echo "=== ML Challenge 2026 EC2 Runner ==="
 echo "Host: $(hostname) | CPU Cores: $(nproc) | RAM: $(free -h | awk '/^Mem:/ {print $2}')"
 
-# Setup virtual environment if not present
+# Canonical params — must match values baked into train_model.py / evaluate_val.py / entity_resolution.py
+TOP_K=60
+MAX_KEY_FREQ=1500
+MATCH_CAP=12
+VAL_HOLDOUT=15000
+DISTRACTOR_CAP=1000000
+
 if [ ! -d "venv" ]; then
     echo "Creating python virtual environment..."
     python3 -m venv venv
@@ -27,12 +33,18 @@ case "$ACTION" in
         echo "Running LightGBM model training with $(nproc) CPU threads..."
         python3 code/business_entity_resolution/src/train_model.py \
             --train-dir dataset/train \
-            --output-model code/business_entity_resolution/src/model.txt
+            --output-model code/business_entity_resolution/src/model.txt \
+            --val-holdout "$VAL_HOLDOUT" \
+            --distractor-cap "$DISTRACTOR_CAP"
         ;;
     eval)
-        echo "Running held-out validation..."
+        echo "Running held-out validation (disjoint from training by construction)..."
         python3 code/business_entity_resolution/src/evaluate_val.py \
-            --threshold "$THRESHOLD"
+            --train-dir dataset/train \
+            --model-path code/business_entity_resolution/src/model.txt \
+            --val-holdout "$VAL_HOLDOUT" \
+            --threshold "$THRESHOLD" \
+            --distractor-cap "$DISTRACTOR_CAP"
         ;;
     infer)
         echo "Running full test inference with threshold $THRESHOLD..."
@@ -40,11 +52,15 @@ case "$ACTION" in
         python3 code/business_entity_resolution/src/entity_resolution.py \
             --test-dir dataset/test \
             --output-dir output \
-            --threshold "$THRESHOLD"
+            --model-path code/business_entity_resolution/src/model.txt \
+            --threshold "$THRESHOLD" \
+            --top-candidates "$TOP_K" \
+            --max-key-freq "$MAX_KEY_FREQ" \
+            --match-cap "$MATCH_CAP"
         echo "Validating outputs..."
         python3 utils/validate_submission.py \
             --matching output/matching_results.tsv \
-            --candidate /tmp/skip.tsv \
+            --candidate output/candidate_pairs.tsv \
             --test-dir dataset/test
         ;;
     *)

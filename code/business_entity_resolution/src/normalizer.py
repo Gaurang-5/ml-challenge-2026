@@ -13,7 +13,8 @@ LEGAL_SUFFIXES = frozenset({
     "limited", "llc", "llp", "plc", "pvt", "private", "sa", "sarl", "sas",
     "eurl", "sci", "snc", "ei", "sasu", "sarlu", "gie", "earl", "selarl",
     "sca", "scs", "services", "center", "enterprises", "solutions",
-    "consulting", "group", "holdings", "associates", "partners", "international"
+    "consulting", "group", "holdings", "associates", "partners", "international",
+    "scop"
 })
 
 ADDRESS_STOP_WORDS = frozenset({
@@ -78,3 +79,15 @@ def clean_address(addr: str) -> tuple[str, list[str], list[str]]:
     numbers = re.findall(r"\d+", cleaned)
     normalized_addr = " ".join(tokens)
     return normalized_addr, tokens, numbers
+
+
+def normalize_country(raw: str | None) -> str:
+    """Normalizes a country label for stable partitioning across sources/files.
+
+    Case/whitespace variants (e.g. "France" vs "FRANCE ") must map to the same
+    partition key, or affected entities silently get zero candidates.
+    """
+    if raw is None:
+        return "__unknown__"
+    c = raw.strip().lower()
+    return c if c else "__unknown__"

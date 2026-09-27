@@ -11,32 +11,56 @@ import lightgbm as lgb
 from rapidfuzz import fuzz
 
 sys.path.insert(0, str(Path(__file__).parent))
-from normalizer import clean_business_name, clean_address
+from normalizer import clean_business_name, clean_address, normalize_country
 from blocking import generate_blocking_keys, InvertedIndex
 from features import extract_pair_features, FEATURE_NAMES
 
 csv.field_size_limit(sys.maxsize)
 
+# Canonical blocking parameters — MUST match evaluate_val.py and entity_resolution.py.
+TOP_K = 60
+MAX_KEY_FREQUENCY = 1500
 
-def train(train_dir: Path, output_model_path: Path, max_queries: int = 40000) -> None:
+
+def train(
+    train_dir: Path,
+    output_model_path: Path,
+    max_queries: int = 40000,
+    val_holdout: int = 15000,
+    distractor_cap: int = 1_000_000,
+) -> None:
     random.seed(42)
     np.random.seed(42)
 
     print(f"Reading ground truth from {train_dir / 'train_ground_truth.tsv'}...", flush=True)
-    gt_map: dict[str, set[str]] = {}
     with open(train_dir / "train_ground_truth.tsv", encoding="utf-8") as f:
         reader = csv.DictReader(f, delimiter="\t")
-        for row in reader:
-            matches = [m for m in row["matched_entity_ids"].split(",") if m]
-            gt_map[row["source1_entity_id"]] = set(matches)
-            if len(gt_map) >= max_queries:
-                break
+        all_rows = list(reader)
+
+    total_rows = len(all_rows)
+    if val_holdout >= total_rows:
+        raise ValueError(
+            f"val_holdout ({val_holdout}) must be smaller than total ground truth rows ({total_rows})"
+        )
+
+    # Reserve the LAST val_holdout rows exclusively for evaluate_val.py.
+    # Training only ever draws from rows [0, total_rows - val_holdout).
+    trainable_rows = all_rows[: total_rows - val_holdout]
+    max_queries = min(max_queries, len(trainable_rows))
+    sample_rows = trainable_rows[:max_queries]
+
+    gt_map: dict[str, set[str]] = {}
+    for row in sample_rows:
+        matches = [m for m in row["matched_entity_ids"].split(",") if m]
+        gt_map[row["source1_entity_id"]] = set(matches)
 
     needed_s1 = set(gt_map.keys())
     needed_targets = {m for ms in gt_map.values() for m in ms}
     singletons_in_sample = sum(1 for ms in gt_map.values() if not ms)
     print(
         f"Sampled {len(needed_s1):,} S1 queries ({singletons_in_sample:,} singletons) "
+        f"from rows [0:{max_queries}] of {total_rows:,} total "
+        f"(last {val_holdout:,} rows reserved for validation) "
         f"with {len(needed_targets):,} true target matches.",
         flush=True,
     )
@@ -54,12 +78,11 @@ def train(train_dir: Path, output_model_path: Path, max_queries: int = 40000) ->
             if len(s1_records) == len(needed_s1):
                 break
 
-    print("Loading target records and building blocking index...", flush=True)
+    print(f"Loading target records and building blocking index (distractor_cap={distractor_cap:,})...", flush=True)
     target_ids: list[str] = []
     target_data: list[tuple[str, str, set[str]]] = []
     index = InvertedIndex()
 
-    distractor_cap = 150000
     distractors_added = 0
     for fname in ["train_source2.tsv", "train_source3.tsv"]:
         with open(train_dir / fname, encoding="utf-8") as f:
@@ -86,7 +109,7 @@ def train(train_dir: Path, output_model_path: Path, max_queries: int = 40000) ->
     for sid, (qn, qa, q_nums, raw_n, raw_a) in s1_records.items():
         truth_set = gt_map[sid]
         query_keys = generate_blocking_keys(raw_n, raw_a)
-        candidates = index.get_candidates(query_keys, max_key_frequency=1200, top_k=45)
+        candidates = index.get_candidates(query_keys, max_key_frequency=MAX_KEY_FREQUENCY, top_k=TOP_K)
         for t_idx, block_weight in candidates:
             eid = target_ids[t_idx]
             tn, ta, t_nums = target_data[t_idx]
@@ -103,7 +126,6 @@ def train(train_dir: Path, output_model_path: Path, max_queries: int = 40000) ->
             y.append(1)
 
     # 3. Hard spatial negatives: different business at the SAME address
-    # Teaches the model that identical address with different name (name_ratio < 0.30) is NEGATIVE
     print("Mining hard spatial negatives (same address, different business)...", flush=True)
     num_spatial_negs = 0
     target_indices = list(range(len(target_data)))
@@ -115,7 +137,6 @@ def train(train_dir: Path, output_model_path: Path, max_queries: int = 40000) ->
             tn_diff, _, _ = target_data[rnd_idx]
             if not tn_diff or fuzz.ratio(qn, tn_diff) >= 30:
                 continue
-            # Pair: query address + distinct target name
             feat = extract_pair_features(qn, qa, q_nums, tn_diff, qa, q_nums, block_weight=8)
             X.append(feat)
             y.append(0)
@@ -124,7 +145,6 @@ def train(train_dir: Path, output_model_path: Path, max_queries: int = 40000) ->
             break
 
     # 4. Hard multi-location negatives: same name at a completely different address
-    # Teaches the model that generic business names on different streets/cities are NEGATIVE
     print("Mining hard name-match negatives (same name, different address)...", flush=True)
     num_name_negs = 0
     for sid, (qn, qa, q_nums, _, _) in s1_records.items():
@@ -149,12 +169,13 @@ def train(train_dir: Path, output_model_path: Path, max_queries: int = 40000) ->
         flush=True,
     )
 
-    # Train/Validation split for live metric tracking
     from sklearn.model_selection import train_test_split
     X_train, X_val, y_train, y_val = train_test_split(
         X, y, test_size=0.10, random_state=42, stratify=y
     )
-    print(f"Split into {len(X_train):,} train pairs and {len(X_val):,} validation pairs.", flush=True)
+    print(f"Split into {len(X_train):,} train pairs and {len(X_val):,} in-sample validation pairs.", flush=True)
+    print("NOTE: this internal split is for early-stopping only — it is NOT the held-out eval "
+          "used by evaluate_val.py (that uses the last rows of ground truth, never seen here).", flush=True)
 
     print("\n--- Starting LightGBM Training (Live Iteration Metrics) ---", flush=True)
     clf = lgb.LGBMClassifier(
@@ -191,5 +212,13 @@ if __name__ == "__main__":
     )
     parser.add_argument("--output-model", type=Path, default=Path(__file__).parent / "model.txt")
     parser.add_argument("--max-queries", type=int, default=40000)
+    parser.add_argument(
+        "--val-holdout",
+        type=int,
+        default=15000,
+        help="Number of ground-truth rows reserved at the END of the file for evaluate_val.py. "
+             "Training never touches these rows.",
+    )
+    parser.add_argument("--distractor-cap", type=int, default=1_000_000)
     args = parser.parse_args()
-    train(args.train_dir, args.output_model, args.max_queries)
+    train(args.train_dir, args.output_model, args.max_queries, args.val_holdout, args.distractor_cap)

@@ -50,14 +50,17 @@ def extract_pair_features(
         a_sort = 0.0
         a_ratio = 0.0
 
-    # Cross-field interaction
-    effective_addr = a_set if not has_empty_addr else 0.85
+    # Cross-field interaction.
+    # IMPORTANT: when address is missing we must NOT assume high similarity —
+    # doing so undoes the whole point of this feature (suppressing false merges
+    # on weak/incomplete records). Use a neutral midpoint instead.
+    effective_addr = a_set if not has_empty_addr else 0.5
     name_addr_interaction = name_sim_max * effective_addr
 
     # Number overlap features
     common_nums = len(q_nums & t_nums)
     total_nums = len(q_nums | t_nums)
-    num_jaccard = (common_nums / total_nums) if total_nums > 0 else (0.5 if has_empty_addr else 0.0)
+    num_jaccard = (common_nums / total_nums) if total_nums > 0 else 0.0
 
     exact_name = 1.0 if qn and qn == tn else 0.0
     exact_addr = 1.0 if qa and qa == ta else 0.0
